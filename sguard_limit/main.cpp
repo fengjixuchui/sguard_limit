@@ -32,7 +32,7 @@ static void HijackThreadWorker() {
 
 	while (1) {
 
-		// scan per 5 seconds when idle;
+		// scan 1~5 seconds when idle;
 		// if process is found, trap into usr-selected mode.
 		if (threadMgr.getTargetPid()) {
 
@@ -61,8 +61,8 @@ static void HijackThreadWorker() {
 			}
 		}
 
-		g_HijackThreadWaiting.notify_all();  // inform main thread for blocked actions.
-		Sleep(3000);  // call sys schedule | no target found, wait.
+		g_HijackThreadWaiting.notify_all();   // inform main thread for blocked actions.
+		Sleep(systemMgr.scanDelay.load());    // call sys schedule | no target found, wait.
 	}
 }
 
@@ -130,10 +130,8 @@ INT WINAPI WinMain(
 	if (!status) {
 		MessageBox(0,
 			"【更新说明】\n\n"
-			" 内存补丁 " MEMPATCH_VERSION "：新增支持Win8/8.1。\n\n"
-			"1. 新增开机自启。\n"
-			"2. 修复：找不到模块，托盘图标消失，不结束ace-loader。\n"
-			"3. 使用C++20重构。\n\n\n"
+			" 内存补丁 " MEMPATCH_VERSION "：新增弱化版“防扫盘1”。\n\n"
+			"1. 绕过ace-base的自我保护机制以避免ZwProtectVirtualMemory1弹窗。\n\n\n"
 			
 			"【重要提示】\n\n"
 			"1. 本工具是免费软件，任何出售本工具的人都是骗子哦！\n\n"
@@ -141,9 +139,16 @@ INT WINAPI WinMain(
 			"   如果看了说明仍未解决你的问题，可以加群反馈：775176979",
 			VERSION "  by: @H3d9", MB_OK);
 
-		MessageBox(0, "限制器默认会自动把SYS文件隐藏到系统目录。\n"
-			          "如果你不想隐藏SYS文件，可以自己点一下右键菜单“其他选项”的相关设置。",
-			          "注意", MB_OK);
+		if (IDYES == MessageBox(0, "是否使用“防扫盘1”的强力模式（等效于22.7.15版本）？\n\n"
+								   "如果你之前出现过“安全组件运行异常”，请选择“否”。",
+								   "提示", MB_YESNO)) {
+
+			patchMgr.patchSwitches.DeviceIoControl_1  = true;
+			patchMgr.patchSwitches.DeviceIoControl_1x = false;
+			configMgr.writeConfig();
+
+			MessageBox(0, "如果出现“安全组件运行异常”，将右键菜单“防扫盘1”改成弱化模式即可。", "提示", MB_OK);
+		}
 	}
 
 

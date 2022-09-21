@@ -4,7 +4,7 @@
 #include <filesystem>
 #include "kdriver.h"
 
-#define DRIVER_VERSION  "22.6.28"
+#define DRIVER_VERSION  "22.9.21"
 
 
 // kernel-mode memory io
@@ -165,9 +165,18 @@ bool KernelDriver::prepareSysfile() {
 
 			if (MoveFileEx(sysCurrentPath.c_str(), sysProfilePath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
 				sysfile = &sysProfilePath;
+			
 			} else {
-				moveStatus  = GetLastError();
-				checkStatus = false;
+				_startService(); // try stop running driver
+				_endService();
+
+				if (MoveFileEx(sysCurrentPath.c_str(), sysProfilePath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+					sysfile = &sysProfilePath;
+
+				} else {
+					moveStatus  = GetLastError();
+					checkStatus = false;
+				}
 			}
 			
 		} else {
@@ -197,9 +206,18 @@ bool KernelDriver::prepareSysfile() {
 
 				if (MoveFileEx(sysProfilePath.c_str(), sysCurrentPath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
 					sysfile = &sysCurrentPath;
+				
 				} else {
-					moveStatus  = GetLastError();
-					checkStatus = false;
+					_startService(); // try stop running driver
+					_endService();
+
+					if (MoveFileEx(sysProfilePath.c_str(), sysCurrentPath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+						sysfile = &sysCurrentPath;
+
+					} else {
+						moveStatus  = GetLastError();
+						checkStatus = false;
+					}
 				}
 
 			} else {
@@ -221,16 +239,12 @@ bool KernelDriver::prepareSysfile() {
 		// sysfile not ready, record error.
 		_recordError(moveStatus,
 			"driver::prepareSysfile(): %s。\n\n"
-			"【解决办法】禁用defender，把以下2个目录加入杀毒信任区，然后重新解压。\n\n"
-			"1. %s\n"
-			"2. %s\n\n"
-			"【提示】%s。",
-			moveStatus ? "移动sys文件失败"
-			           : "找不到sys文件：“SGuardLimit_VMIO.sys”",
+			"【解决办法】重启电脑再重新下载解压；若还不行，则先禁用defender，然后把以下2个目录加入杀毒信任区（如有杀毒），再重新下载解压。\n\n"
+			"1. %s\n2. %s\n\n%s",
+			moveStatus ? "移动sys文件失败" : "找不到sys文件：“SGuardLimit_VMIO.sys”",
 			currentPath.c_str(),
 			profilePath.c_str(),
-			moveStatus ? "如果不想移动sys文件而是直接从当前目录加载它，可以取消右键菜单“其他选项→将驱动文件隐藏到系统用户目录”，并重启限制器" 
-			           : "先解压再运行，不要直接在压缩包里点开。解压目录不要包含特殊符号");
+			moveStatus ? "" : "【提示】把限制器和附带的sys文件解压到一起再运行，不要直接在压缩包里点开。解压目录不要包含特殊符号。");
 
 		return driverReady = false;
 	}
@@ -419,6 +433,24 @@ bool KernelDriver::searchVad(DWORD pid, std::vector<ULONG64>& out, const wchar_t
 	return true;
 }
 
+bool KernelDriver::restoreVad() {
+
+	VMIO_REQUEST  request(0);
+	DWORD         Bytes;
+
+	_resetError();
+
+
+	if (!DeviceIoControl(hDriver, VM_VADRESTORE, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
+		_recordError(GetLastError(), "driver::restoreVad(): DeviceIoControl失败。");
+		return false;
+	}
+	
+	return true;
+}
+
+
+
 #define SVC_ERROR_EXIT(errorCode, errorMsg)   _recordError(errorCode, errorMsg); \
                                               if (hService) CloseServiceHandle(hService); \
                                               if (hSCManager) CloseServiceHandle(hSCManager); \
@@ -486,7 +518,7 @@ bool KernelDriver::_startService() {
 	if (!StartService(hService, 0, NULL)) {
 		DWORD errorCode = GetLastError();
 		DeleteService(hService);
-		SVC_ERROR_EXIT(errorCode, "StartService失败。你可以尝试关闭杀毒/禁用defender。");
+		SVC_ERROR_EXIT(errorCode, "StartService失败。建议查看常见问题文档。");
 	}
 
 	return true;
@@ -533,7 +565,7 @@ bool KernelDriver::_checkSysVersion() {
 
 	if (0 != strcmp(request.data, DRIVER_VERSION)) {
 		_recordError(0, "driver::checkSysVersion(): 内核驱动文件“SGuardLimit_VMIO.sys”不是最新的。\n\n"
-			"解决办法：先把sys和exe解压至同一目录下，然后再打开，不要从压缩包里直接点开。");
+			"【提示】需要把限制器和附带的sys文件解压到一起再运行，不要直接在压缩包里点开。");
 		return false;
 	}
 

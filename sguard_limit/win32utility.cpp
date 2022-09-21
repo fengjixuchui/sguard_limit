@@ -144,7 +144,7 @@ bool win32ThreadManager::enumTargetThread(DWORD desiredAccess) { // => threadLis
 win32SystemManager win32SystemManager::systemManager;
 
 win32SystemManager::win32SystemManager() 
-	: autoStartup(false), killAceLoader(true), hInstance(NULL), hProgram(NULL), hWnd(NULL),
+	: autoStartup(false), killAceLoader(true), scanDelay(3000), hInstance(NULL), hProgram(NULL), hWnd(NULL),
 	  osVersion(OSVersion::OTHERS), osBuildNum(0), logfp(NULL), icon{}, currentDir{}, profileDir{} {}
 
 win32SystemManager::~win32SystemManager() {
@@ -154,7 +154,7 @@ win32SystemManager::~win32SystemManager() {
 	}
 
 	if (hProgram) {
-		CloseHandle(hProgram);
+		ReleaseMutex(hProgram);
 	}
 }
 
@@ -206,7 +206,7 @@ void win32SystemManager::setupProcessDpi() {
 
 bool win32SystemManager::systemInit(HINSTANCE hInstance) {
 
-	this->hInstance      = hInstance;
+	this->hInstance        = hInstance;
 
 
 	// decide whether it's single instance.
@@ -243,9 +243,11 @@ bool win32SystemManager::systemInit(HINSTANCE hInstance) {
 
 	if (!std::filesystem::is_directory(profileDir, ec)) {
 		if (!std::filesystem::create_directory(profileDir, ec)) {
-			if (!std::filesystem::create_directory(profileDir = "C:\\sguard_limit", ec)) {
-				panic(ec.value(), "创建用户数据目录失败。");
-				return false;
+			if (!std::filesystem::is_directory(profileDir = "C:\\sguard_limit", ec)) {
+				if (!std::filesystem::create_directory(profileDir, ec)) {
+					panic(ec.value(), "创建用户数据目录失败。");
+					return false;
+				}
 			}
 		}
 	}
@@ -255,14 +257,14 @@ bool win32SystemManager::systemInit(HINSTANCE hInstance) {
 	auto      logfile       = profileDir + "\\log.txt";
 	DWORD     logfileSize   = GetCompressedFileSize(logfile.c_str(), NULL);
 
-	if (logfileSize != INVALID_FILE_SIZE && logfileSize > (1 << 16)) { // 64KB
+	if (logfileSize != INVALID_FILE_SIZE && logfileSize > (1 << 15)) { // 32KB
 		DeleteFile(logfile.c_str());
 	}
 
 	logfp = fopen(logfile.c_str(), "a+");
 
 	if (!logfp) {
-		panic("打开log文件%s失败。", logfile.c_str());
+		panic("打开log文件失败。");
 		return false;
 	}
 
@@ -301,9 +303,12 @@ bool win32SystemManager::systemInit(HINSTANCE hInstance) {
 			}  // else default to:  OSVersion::OTHERS
 
 			osBuildNum = osInfo.dwBuildNumber;
+
+			log("systemInit(): Running on Windows NT %u.%u.%u", 
+				osInfo.dwMajorVersion, osInfo.dwMinorVersion, osInfo.dwBuildNumber);
 		}
 	}
-
+	
 
 	return true;
 }
@@ -505,7 +510,7 @@ void win32SystemManager::raiseCleanThread() {
 		}
 
 
-		// wait 60 secs after game (SG) start to ensure it's stable to clean.
+		// wait 60 secs after game start to ensure it's stable to clean.
 		// if game not exist, still wait 60 secs and make clean.
 		win32ThreadManager  threadMgr;
 		DWORD               pid            = threadMgr.getTargetPid();
@@ -517,7 +522,7 @@ void win32SystemManager::raiseCleanThread() {
 			Sleep(5000);
 			timeElapsed += 5;
 
-			// every 5 secs, check SG's instance.
+			// every 5 secs, check SGUARD instance.
 			// if one of (SG not exist || SG pid alive) keeps 60 secs, kill ace-loader.
 			auto pidNow = threadMgr.getTargetPid();
 
