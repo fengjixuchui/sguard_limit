@@ -4,7 +4,9 @@
 #include <filesystem>
 #include "kdriver.h"
 
-#define DRIVER_VERSION  "22.9.21"
+
+#define DRIVER_NAME       "sguard_limit"
+#define DRIVER_VERSION    "22.11.3"
 
 
 // kernel-mode memory io
@@ -12,8 +14,8 @@ KernelDriver  KernelDriver::kernelDriver;
 
 KernelDriver::KernelDriver()
 	: loadFromProfileDir(true), driverReady(false), win11ForceEnable(false), win11CurrentBuild(0),
-	  currentPath{}, profilePath{}, sysCurrentPath{}, sysProfilePath{}, sysfile(NULL),
-	  hSCManager(NULL), hService(NULL), hDriver(INVALID_HANDLE_VALUE),
+	  currentPath{}, profilePath{}, sysCurrentPath{}, sysProfilePath{}, sysfile(&sysProfilePath), // forbid crash in start service
+	  hSCManager(NULL), hService(NULL), hDriver(INVALID_HANDLE_VALUE), refCount{0}, refLock{},
 	  errorMessage_ptr(new char[0x1000]), errorCode(0), errorMessage(NULL) {
 	errorMessage = errorMessage_ptr.get();
 }
@@ -34,8 +36,8 @@ bool KernelDriver::init(const std::string& currentDir, const std::string& profil
 	// initialize path for locating sysfile and show hint as fail occurs.
 	currentPath    = currentDir;
 	profilePath    = profileDir;
-	sysCurrentPath = currentDir + "\\SGuardLimit_VMIO.sys";
-	sysProfilePath = profileDir + "\\SGuardLimit_VMIO.sys";
+	sysCurrentPath = currentDir + "\\" DRIVER_NAME ".sys";
+	sysProfilePath = profileDir + "\\" DRIVER_NAME ".sys";
 
 
 	// import certificate key.
@@ -159,34 +161,27 @@ bool KernelDriver::prepareSysfile() {
 	if (loadFromProfileDir) {
 
 		// 1. should load from profile dir:
+		sysfile = &sysProfilePath;
 		
 		// check current dir, and move sysfile in if exists.
 		if (std::filesystem::exists(sysCurrentPath, ec)) {
 
-			if (MoveFileEx(sysCurrentPath.c_str(), sysProfilePath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-				sysfile = &sysProfilePath;
-			
-			} else {
+			if (!MoveFileEx(sysCurrentPath.c_str(), sysProfilePath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+
 				_startService(); // try stop running driver
 				_endService();
 
-				if (MoveFileEx(sysCurrentPath.c_str(), sysProfilePath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-					sysfile = &sysProfilePath;
-
-				} else {
-					moveStatus  = GetLastError();
+				if (!MoveFileEx(sysCurrentPath.c_str(), sysProfilePath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+					
+					moveStatus = GetLastError();
 					checkStatus = false;
 				}
 			}
 			
 		} else {
 
-			// if not exist, check profile dir.
-			if (std::filesystem::exists(sysProfilePath, ec)) {
-				sysfile = &sysProfilePath;
-
-			} else {
-				// file not exist at all.
+			// if not exist, check profile dir. if file not exist at all, fail.
+			if (!std::filesystem::exists(sysProfilePath, ec)) {
 				checkStatus = false;
 			}
 		}
@@ -194,33 +189,28 @@ bool KernelDriver::prepareSysfile() {
 	} else {
 
 		// 2. should load from current dir:
+		sysfile = &sysCurrentPath;
 
 		// check current dir, and load it directly if exists.
-		if (std::filesystem::exists(sysCurrentPath, ec)) {
-			sysfile = &sysCurrentPath;
-
-		} else {
-
+		if (!std::filesystem::exists(sysCurrentPath, ec)) {
+			
 			// if not exist, try move sysfile out of profile dir if exists.
 			if (std::filesystem::exists(sysProfilePath, ec)) {
 
-				if (MoveFileEx(sysProfilePath.c_str(), sysCurrentPath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-					sysfile = &sysCurrentPath;
-				
-				} else {
-					_startService(); // try stop running driver
+				if (!MoveFileEx(sysProfilePath.c_str(), sysCurrentPath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+					
+					_startService();
 					_endService();
 
-					if (MoveFileEx(sysProfilePath.c_str(), sysCurrentPath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-						sysfile = &sysCurrentPath;
-
-					} else {
-						moveStatus  = GetLastError();
+					if (!MoveFileEx(sysProfilePath.c_str(), sysCurrentPath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+						
+						moveStatus = GetLastError();
 						checkStatus = false;
 					}
 				}
 
 			} else {
+
 				// file not exist at all.
 				checkStatus = false;
 			}
@@ -239,12 +229,12 @@ bool KernelDriver::prepareSysfile() {
 		// sysfile not ready, record error.
 		_recordError(moveStatus,
 			"driver::prepareSysfile(): %s。\n\n"
-			"【解决办法】重启电脑再重新下载解压；若还不行，则先禁用defender，然后把以下2个目录加入杀毒信任区（如有杀毒），再重新下载解压。\n\n"
-			"1. %s\n2. %s\n\n%s",
-			moveStatus ? "移动sys文件失败" : "找不到sys文件：“SGuardLimit_VMIO.sys”",
-			currentPath.c_str(),
-			profilePath.c_str(),
-			moveStatus ? "" : "【提示】把限制器和附带的sys文件解压到一起再运行，不要直接在压缩包里点开。解压目录不要包含特殊符号。");
+			"【解决办法】右键菜单->其他选项->打开系统用户目录，把压缩包里的sys文件手动放到这里。限制器目录若有sys文件则删掉。\n"
+			"若还不行：先禁用defender，把以下2个目录加入杀毒信任区（如有杀毒），然后重试：\n\n"
+			"1. %s\n2. %s\n\n"
+			"【提示】可以查看附带的常见问题文档。",
+			moveStatus ? "移动sys文件失败" : "找不到sys文件：“" DRIVER_NAME ".sys”",
+			currentPath.c_str(), profilePath.c_str());
 
 		return driverReady = false;
 	}
@@ -252,7 +242,10 @@ bool KernelDriver::prepareSysfile() {
 
 bool KernelDriver::load() {
 
+	std::lock_guard<std::mutex> cxx_guard(refLock);
+	
 	_resetError();
+
 
 	if (hDriver == INVALID_HANDLE_VALUE) {
 
@@ -260,25 +253,38 @@ bool KernelDriver::load() {
 			return false;
 		}
 
-		hDriver = CreateFile("\\\\.\\SGuardLimit_VMIO", GENERIC_ALL, FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
-		
+		hDriver = CreateFile("\\\\.\\" DRIVER_NAME, GENERIC_ALL, FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
+
 		if (hDriver == INVALID_HANDLE_VALUE) {
 			_recordError(GetLastError(), "driver::load(): CreateFile失败。");
 			return false;
 		}
 	}
 
+
+	refCount++;  // refCount > 0 is guarenteed if driver load success.
 	return true;
 }
 
 void KernelDriver::unload() {
 
-	if (hDriver != INVALID_HANDLE_VALUE) {
+	std::lock_guard<std::mutex> cxx_guard(refLock);
 
-		CloseHandle(hDriver);
-		hDriver = INVALID_HANDLE_VALUE;
 
-		_endService();
+	if (hDriver != INVALID_HANDLE_VALUE) { // if driver is loaded then refCount > 0.
+
+		refCount--;
+
+		if (refCount == 0) {
+
+			CloseHandle(hDriver);
+			hDriver = INVALID_HANDLE_VALUE;
+
+			_endService();
+		}
+
+	} else {
+		refCount = 0;
 	}
 }
 
@@ -300,7 +306,7 @@ bool KernelDriver::readVM(DWORD pid, PVOID out, PVOID targetAddress) {
 			return false;
 		}
 		if (request.errorCode != 0) {
-			_recordError(request.errorCode, "driver::readVM(): from kernel: %s", request.errorFunc);
+			_recordError(request.errorCode, "%s", request.errorFunc);
 			return false;
 		}
 
@@ -330,7 +336,7 @@ bool KernelDriver::writeVM(DWORD pid, PVOID in, PVOID targetAddress) {
 			return false;
 		}
 		if (request.errorCode != 0) {
-			_recordError(request.errorCode, "driver::writeVM(): from kernel: %s", request.errorFunc);
+			_recordError(request.errorCode, "%s", request.errorFunc);
 			return false;
 		}
 	}
@@ -351,7 +357,7 @@ bool KernelDriver::allocVM(DWORD pid, PVOID* pAllocatedAddress) {
 		return false;
 	}
 	if (request.errorCode != 0) {
-		_recordError(request.errorCode, "driver::allocVM(): from kernel: %s", request.errorFunc);
+		_recordError(request.errorCode, "%s", request.errorFunc);
 		return false;
 	}
 
@@ -373,7 +379,7 @@ bool KernelDriver::suspend(DWORD pid) {
 		return false;
 	}
 	if (request.errorCode != 0) {
-		_recordError(request.errorCode, "driver::suspend(): from kernel: %s", request.errorFunc);
+		_recordError(request.errorCode, "%s", request.errorFunc);
 		return false;
 	}
 
@@ -393,7 +399,7 @@ bool KernelDriver::resume(DWORD pid) {
 		return false;
 	}
 	if (request.errorCode != 0) {
-		_recordError(request.errorCode, "driver::resume(): from kernel: %s", request.errorFunc);
+		_recordError(request.errorCode, "%s", request.errorFunc);
 		return false;
 	}
 
@@ -415,7 +421,7 @@ bool KernelDriver::searchVad(DWORD pid, std::vector<ULONG64>& out, const wchar_t
 		return false;
 	}
 	if (request.errorCode != 0) {
-		_recordError(request.errorCode, "driver::searchVad(): from kernel: %s", request.errorFunc);
+		_recordError(request.errorCode, "%s", request.errorFunc);
 		return false;
 	}
 
@@ -449,6 +455,26 @@ bool KernelDriver::restoreVad() {
 	return true;
 }
 
+bool KernelDriver::patchAceBase() {
+
+	VMIO_REQUEST  request(0);
+	DWORD         Bytes;
+
+	_resetError();
+
+
+	if (!DeviceIoControl(hDriver, PATCH_ACEBASE, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
+		_recordError(GetLastError(), "driver::patchAceBase(): DeviceIoControl失败。");
+		return false;
+	}
+	if (request.errorCode != 0) {
+		_recordError(request.errorCode, "%s", request.errorFunc);
+		return false;
+	}
+
+	return true;
+}
+
 
 
 #define SVC_ERROR_EXIT(errorCode, errorMsg)   _recordError(errorCode, errorMsg); \
@@ -470,11 +496,11 @@ bool KernelDriver::_startService() {
 	}
 
 	// open Service.
-	hService = OpenService(hSCManager, "SGuardLimit_VMIO", SERVICE_ALL_ACCESS);
+	hService = OpenService(hSCManager, DRIVER_NAME, SERVICE_ALL_ACCESS);
 
 	if (!hService) {
 		hService = 
-		CreateService(hSCManager, "SGuardLimit_VMIO", "SGuardLimit_VMIO",
+		CreateService(hSCManager, DRIVER_NAME, DRIVER_NAME,
 			SERVICE_ALL_ACCESS, SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
 			sysfile->c_str(),  /* no quote here, msdn e.g. is wrong */ /* assert path is valid */
 			NULL, NULL, NULL, NULL, NULL);
@@ -518,7 +544,7 @@ bool KernelDriver::_startService() {
 	if (!StartService(hService, 0, NULL)) {
 		DWORD errorCode = GetLastError();
 		DeleteService(hService);
-		SVC_ERROR_EXIT(errorCode, "StartService失败。建议查看常见问题文档。");
+		SVC_ERROR_EXIT(errorCode, "StartService失败。建议禁用defender并加杀毒白名单，然后重启电脑，重新下载解压。\n\n【提示】可以查看附带的常见问题文档。");
 	}
 
 	return true;
@@ -564,7 +590,7 @@ bool KernelDriver::_checkSysVersion() {
 	this->unload();
 
 	if (0 != strcmp(request.data, DRIVER_VERSION)) {
-		_recordError(0, "driver::checkSysVersion(): 内核驱动文件“SGuardLimit_VMIO.sys”不是最新的。\n\n"
+		_recordError(0, "driver::checkSysVersion(): 内核驱动文件“" DRIVER_NAME ".sys”不是最新的。\n\n"
 			"【提示】需要把限制器和附带的sys文件解压到一起再运行，不要直接在压缩包里点开。");
 		return false;
 	}

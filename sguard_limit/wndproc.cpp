@@ -1,4 +1,5 @@
 ﻿#include <Windows.h>
+#include <CommCtrl.h>
 #include <stdio.h>
 #include <atomic>
 #include <random>
@@ -11,6 +12,7 @@
 #include "tracecore.h"
 #include "mempatch.h"
 
+#pragma comment(lib, "Comctl32.lib")
 #pragma comment(linker, "/manifestdependency:\"type='win32' \
 						 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 						 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' \
@@ -54,15 +56,16 @@ static void ShowAbout() {
 			"内存补丁 " MEMPATCH_VERSION "（21.10.6）：\n\n"
 			"这是默认模式，建议优先使用，如果不好用再换其他模式。\n\n"
 
-			">1 NtQueryVirtualMemory(V2): 令SGUARD扫内存的速度变慢。\n\n"
-			">2 NtReadVirtualMemory(V4.3): 拒绝SGUARD在应用层跨进程读内存。\n\n"
-			">3 GetAsyncKeyState(V3): 令SGUARD读取键盘按键的速度变慢。\n\n"
-			">4 NtWaitForSingleObject, NtDelayExecution: 已弃用，不要使用。\n\n"
+			">1 NtQueryVirtualMemory(V2): 令SGUARD扫内存的速度变慢。\n"
+			">2 NtReadVirtualMemory(V4.3): 拒绝SGUARD在应用层跨进程读内存。\n"
+			">3 GetAsyncKeyState(V3): 令SGUARD读取键盘按键的速度变慢。\n"
+			">4 NtWaitForSingleObject, NtDelayExecution: 已弃用。\n\n"
 			">5 伪造ACE-BASE.sys的MDL控制代码(V4.2): 强化防扫盘，防止间歇性卡硬盘\n"
-			">5 缓解指向ACE-BASE的CPL0通信速度(V4.6): 弱化防扫盘，避免安全组件运行异常\n\n"
-			">6 执行失败的文件系统记录枚举(V4.2): 防止高强度扫硬盘（偶尔出现）。\n\n"
+			">5 缓解指向ACE-BASE的CPL0通信速度(V4.6): 弱化防扫盘，避免安全组件运行异常\n"
+			">6 执行失败的文件系统记录枚举(V4.2): 防止高强度扫硬盘（偶尔出现）\n"
 			"【注】游戏刚启动时SG读盘是不可避免的，若屏蔽则游戏会启动失败。\n"
-			" 间歇性卡硬盘原因为SG使用MDL读其他进程内存而这些内存刚好位于页面文件。\n\n\n"
+			" 间歇性卡硬盘原因为SG使用MDL读其他进程内存而这些内存刚好位于页面文件。\n\n"
+			">7 [R0] re-write Nt!ACE-BASE+0x10cfe9: 防止启动游戏后system进程占用cpu。\n\n\n"
 			
 			"> 高级内存搜索(V4)：启用后修改内存可以瞬间完成。\n"
 			"【注】你可以在“设置延迟”中更改“等待稳定的时间”（第二个，默认20秒那个）\n"
@@ -419,7 +422,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			} else { // if (g_Mode == 2) 
 
 				if (!driver.driverReady) {
-					AppendMenuW(hMenu, MFT_STRING, IDM_ABOUT, L"SGuard限制器 - 模式无效（驱动未初始化）");
+					AppendMenuW(hMenu, MFT_STRING, IDM_ABOUT, L"SGuard限制器 - 模式无效（驱动初始化失败）");
 				} else {
 					if (g_HijackThreadWaiting) {
 						AppendMenuW(hMenu, MFT_STRING, IDM_ABOUT, L"SGuard限制器 - 等待游戏运行");
@@ -431,7 +434,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 							patchMgr.patchSwitches.NtWaitForSingleObject +
 							patchMgr.patchSwitches.NtDelayExecution +
 							patchMgr.patchSwitches.DeviceIoControl_1 +
-							patchMgr.patchSwitches.DeviceIoControl_2;
+							patchMgr.patchSwitches.DeviceIoControl_2/* +
+							patchMgr.patchSwitches.R0_AceBase*/;
 
 						int finished =
 							patchMgr.patchStatus.NtQueryVirtualMemory +
@@ -440,7 +444,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 							patchMgr.patchStatus.NtWaitForSingleObject +
 							patchMgr.patchStatus.NtDelayExecution +
 							patchMgr.patchStatus.DeviceIoControl_1 +
-							patchMgr.patchStatus.DeviceIoControl_2;
+							patchMgr.patchStatus.DeviceIoControl_2/* +
+							patchMgr.patchStatus.R0_AceBase*/;
 
 						if (finished == 0) {
 							if (patchMgr.patchFailCount == 0) {
@@ -487,6 +492,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				}
 				AppendMenu(hMenu, drvMenuType, IDM_PATCHSWITCH7, "[防扫盘2] 执行失败的文件系统记录枚举");
 				AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+				AppendMenu(hMenu, drvMenuType, IDM_PATCHSWITCH8, "[R0] 限制System进程占用CPU（should_exit）");
+				AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
 				AppendMenu(hMenu, drvMenuType, IDM_ADVMEMSEARCH, "启用高级内存搜索");
 				sprintf(buf, "设置延迟（当前：0/%u", patchMgr.patchDelayBeforeNtdlletc.load());
 				if (patchMgr.patchSwitches.NtQueryVirtualMemory) {
@@ -531,6 +538,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				if (patchMgr.patchSwitches.DeviceIoControl_2) {
 					CheckMenuItem(hMenu, IDM_PATCHSWITCH7, MF_CHECKED);
 				}
+				/*if (patchMgr.patchSwitches.R0_AceBase) {
+					CheckMenuItem(hMenu, IDM_PATCHSWITCH8, MF_CHECKED);
+				}*/
 				CheckMenuItem(hMenu, IDM_ADVMEMSEARCH, MF_CHECKED);
 			}
 
@@ -573,7 +583,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 			// mode
 		case IDM_MODE_HIJACK:
-			if (IDYES == MessageBox(0, "“时间片轮转”是旧版功能，可能导致游戏掉线！\n不建议使用该功能，你确定要切换吗？", "注意：已弃用的功能！", MB_YESNO)) {
+			if (IDYES == MessageBox(0, "警告：该选项已废弃！\n\n不要启用这一选项，除非你知道你在做什么，要继续么？", "警告：功能已弃用！", MB_YESNO)) {
 				traceMgr.disable();
 				patchMgr.disable();
 				limitMgr.enable();
@@ -582,7 +592,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			}
 			break;
 		case IDM_MODE_TRACE:
-			if (IDYES == MessageBox(0, "“线程追踪”是旧版功能，可能导致游戏掉线！\n不建议使用该功能，你确定要切换吗？", "注意：已弃用的功能！", MB_YESNO)) {
+			if (IDYES == MessageBox(0, "警告：该选项已废弃！\n\n不要启用这一选项，除非你知道你在做什么，要继续么？", "警告：功能已弃用！", MB_YESNO)) {
 				limitMgr.disable();
 				patchMgr.disable();
 				traceMgr.enable();
@@ -643,31 +653,41 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			// patch
 		case IDM_SETDELAY:
 		{
-			sprintf(buf, "请设置以下选项的延迟：如果不想设置某选项，可以直接关闭窗口。\n\n"
-				"开启防扫盘功能后等待SGUARD稳定的时间\n"
-				"%s%s%s%s%s\n\n"
-				"【提示】如果不知道某选项的作用，请勿胡乱设置，否则可能游戏掉线/无法启动。\n",
-				patchMgr.patchSwitches.NtQueryVirtualMemory ?  "NtQueryVirtualMemory\n" : "",
-				patchMgr.patchSwitches.GetAsyncKeyState ?      "GetAsyncKeyState\n" : "",
-				patchMgr.patchSwitches.NtWaitForSingleObject ? "NtWaitForSingleObject\n" : "",
-				patchMgr.patchSwitches.NtDelayExecution ?      "NtDelayExecution\n" : "",
-				patchMgr.patchSwitches.DeviceIoControl_1x ?    "指向ACE-BASE的CPL0通信时间\n" : "");
+			TASKDIALOG_BUTTON buttons[] = {
+			 { 1000, L"开启防扫盘功能后等待SGUARD稳定的时间" },
+			 { 1001, L"NtQueryVirtualMemory" },
+			 { 1002, L"GetAsyncKeyState" },
+			 { 1003, L"NtWaitForSingleObject" },
+			 { 1004, L"NtDelayExecution" },
+			 { 1005, L"指向ACE-BASE的CPL0通信时间" },
+			};
 
-			if (IDYES == MessageBox(0, buf, "设置延迟", MB_YESNO)) {
-				DialogBoxParam(systemMgr.hInstance, MAKEINTRESOURCE(IDD_DIALOG), NULL, DlgProc, DLGPARAM_PATCHWAIT);
-				if (patchMgr.patchSwitches.NtQueryVirtualMemory) {
+			TASKDIALOGCONFIG config    = { sizeof(TASKDIALOGCONFIG) };
+			config.hwndParent          = hWnd;
+			config.dwFlags             = TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_COMMAND_LINKS;
+			config.dwCommonButtons     = TDCBF_CANCEL_BUTTON;
+			config.pButtons            = buttons;
+			config.cButtons            = _countof(buttons);
+			config.nDefaultButton      = 1005;
+			config.pszWindowTitle      = L"设置延迟";
+			config.pszMainIcon         = TD_INFORMATION_ICON;
+			config.pszMainInstruction  = L"选定一个选项以开始设置延迟。";
+			config.pszContent          = L"如果不知道某选项的作用，请勿胡乱设置，否则可能游戏掉线！\n设置的延迟必须在相应右键菜单显示为已选择时才生效。";
+
+			int buttonClicked;
+			if (SUCCEEDED(TaskDialogIndirect(&config, &buttonClicked, NULL, NULL)) && buttonClicked != IDCANCEL) {
+				
+				if (buttonClicked == 1000) {
+					DialogBoxParam(systemMgr.hInstance, MAKEINTRESOURCE(IDD_DIALOG), NULL, DlgProc, DLGPARAM_PATCHWAIT);
+				} else if (buttonClicked == 1001) {
 					DialogBoxParam(systemMgr.hInstance, MAKEINTRESOURCE(IDD_DIALOG), NULL, DlgProc, DLGPARAM_PATCHDELAY1);
-				}
-				if (patchMgr.patchSwitches.GetAsyncKeyState) {
+				} else if (buttonClicked == 1002) {
 					DialogBoxParam(systemMgr.hInstance, MAKEINTRESOURCE(IDD_DIALOG), NULL, DlgProc, DLGPARAM_PATCHDELAY2);
-				}
-				if (patchMgr.patchSwitches.NtWaitForSingleObject) {
+				} else if (buttonClicked == 1003) {
 					DialogBoxParam(systemMgr.hInstance, MAKEINTRESOURCE(IDD_DIALOG), NULL, DlgProc, DLGPARAM_PATCHDELAY3);
-				}
-				if (patchMgr.patchSwitches.NtDelayExecution) {
+				} else if (buttonClicked == 1004) {
 					DialogBoxParam(systemMgr.hInstance, MAKEINTRESOURCE(IDD_DIALOG), NULL, DlgProc, DLGPARAM_PATCHDELAY4);
-				}
-				if (patchMgr.patchSwitches.DeviceIoControl_1x) {
+				} else if (buttonClicked == 1005) {
 					DialogBoxParam(systemMgr.hInstance, MAKEINTRESOURCE(IDD_DIALOG), NULL, DlgProc, DLGPARAM_PATCHDELAY5);
 				}
 
@@ -719,7 +739,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			if (patchMgr.patchSwitches.NtWaitForSingleObject) {
 				patchMgr.patchSwitches.NtWaitForSingleObject = false;
 			} else {
-				if (IDYES == MessageBox(0, "警告：随意设置该选项可能导致游戏异常！\n\n不要启用这一选项，除非你知道你在做什么，要继续么？", "警告", MB_YESNO)) {
+				if (IDYES == MessageBox(0, "警告：如使用未出现问题或未说明，请勿勾选该选项。\n\n仍要继续吗？", "警告", MB_YESNO)) {
 					patchMgr.patchSwitches.NtWaitForSingleObject = true;
 				} else {
 					break;
@@ -752,7 +772,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			break;
 		case IDM_PATCHSWITCH6_2: // strong ioctl_1
 			if (!(patchMgr.patchSwitches.DeviceIoControl_1 && !patchMgr.patchSwitches.DeviceIoControl_1x)) {
-				if (IDYES == MessageBox(0, "强力模式可能导致安全组件运行异常，建议你优先使用弱化模式。\n\n仍要继续吗？", "注意", MB_YESNO)) {
+				if (IDYES == MessageBox(0, "警告：该选项已废弃！\n\n不要启用这一选项，除非你知道你在做什么，要继续么？", "警告：功能已弃用！", MB_YESNO)) {
 					patchMgr.patchSwitches.DeviceIoControl_1 = true;
 					patchMgr.patchSwitches.DeviceIoControl_1x = false;
 
@@ -763,7 +783,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			break;
 		case IDM_PATCHSWITCH6_3: // close ioctl_1
 			if (patchMgr.patchSwitches.DeviceIoControl_1) {
-				if (IDYES == MessageBox(0, "点击“是”将关闭NtDeviceIoControlFile开关。\n若你不知道如何选择，请回答“否”。", "注意", MB_YESNO)) {
+				if (IDYES == MessageBox(0, "点击“是”将关闭[防扫盘1]开关。\n若你不知道如何选择，请回答“否”。", "注意", MB_YESNO)) {
 					patchMgr.patchSwitches.DeviceIoControl_1 = false;
 					patchMgr.patchSwitches.DeviceIoControl_1x = false;
 
@@ -774,7 +794,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			break;
 		case IDM_PATCHSWITCH7:
 			if (patchMgr.patchSwitches.DeviceIoControl_2) {
-				if (IDYES == MessageBox(0, "点击“是”将关闭NtFsControlFile开关。\n若你不知道如何选择，请回答“否”。", "注意", MB_YESNO)) {
+				if (IDYES == MessageBox(0, "点击“是”将关闭[防扫盘2]开关。\n若你不知道如何选择，请回答“否”。", "注意", MB_YESNO)) {
 					patchMgr.patchSwitches.DeviceIoControl_2 = false;
 				} else {
 					break;
@@ -785,7 +805,30 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			configMgr.writeConfig();
 			MessageBox(0, "重启游戏后生效", "注意", MB_OK);
 			break;
+		case IDM_PATCHSWITCH8:
+		{
+			TASKDIALOG_BUTTON buttons[] = {
+			 { 1000, L"我已阅读并继续(&R)" },
+			 { 1001, L"取消(&C)" },
+			};
 
+			TASKDIALOGCONFIG config    = { sizeof(TASKDIALOGCONFIG) };
+			config.hwndParent          = hWnd;
+			config.dwFlags             = TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_COMMAND_LINKS;
+			config.pButtons            = buttons;
+			config.cButtons            = _countof(buttons);
+			config.nDefaultButton      = 1001;
+			config.pszWindowTitle      = L"Ring 0 操作警告";
+			config.pszMainIcon         = TD_WARNING_ICON;
+			config.pszMainInstruction  = L"点击“继续”将限制system进程占用cpu。";
+			config.pszContent          = L"建议你看到“System进程”持续高占用时再点此选项，否则可能出现错误。\n该选项现在并不兼容ACE-BASE.sys的全部版本。";
+
+			int buttonClicked;
+			if (SUCCEEDED(TaskDialogIndirect(&config, &buttonClicked, NULL, NULL)) && buttonClicked == 1000) {
+				patchMgr.patch_r0();
+			}
+		}
+		break;
 			// more options
 		case IDM_AUTOSTARTUP:
 		{

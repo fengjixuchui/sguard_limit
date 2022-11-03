@@ -2,11 +2,13 @@
 // 特别感谢: Zer0Mem0ry BlackBone
 #include <ntdef.h>
 #include <ntifs.h>
+#include <wdm.h>
+#include <intrin.h>
 
 #include "Vad.h"
 
+#define DRIVER_VERSION  "22.11.3"
 
-#define DRIVER_VERSION  "22.9.21"
 
 // 全局对象
 RTL_OSVERSIONINFOW   OSVersion;
@@ -26,6 +28,7 @@ PVOID                TargetVad;
 #define IO_RESUME      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0705, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
 #define VM_VADSEARCH   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0706, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
 #define VM_VADRESTORE  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0707, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+#define PATCH_ACEBASE  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0708, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
 
 typedef struct {
 	HANDLE   pid;
@@ -38,7 +41,38 @@ typedef struct {
 } VMIO_REQUEST;
 
 
-// ZwProtectVirtualMemory (win7/win8未导出符号)
+// windows未公开的结构
+typedef enum _SYSTEM_INFORMATION_CLASS {
+	SystemModuleInformation = 0x0B,
+} SYSTEM_INFORMATION_CLASS;
+
+typedef struct _RTL_PROCESS_MODULE_INFORMATION {
+	PVOID Section;
+	PVOID MappedBase;
+	PVOID ImageBase;
+	ULONG ImageSize;
+	ULONG Flags;
+	USHORT LoadOrderIndex;
+	USHORT InitOrderIndex;
+	USHORT LoadCount;
+	USHORT OffsetToFileName;
+	CHAR FullPathName[0x0100];
+} RTL_PROCESS_MODULE_INFORMATION;
+
+typedef struct _RTL_PROCESS_MODULES {
+	ULONG NumberOfModules;
+	RTL_PROCESS_MODULE_INFORMATION Modules[ANYSIZE_ARRAY]; // evil hack
+} RTL_PROCESS_MODULES;
+
+
+// ZwQuerySystemInformation (未声明)
+NTSTATUS ZwQuerySystemInformation(
+	SYSTEM_INFORMATION_CLASS SystemInformationClass,
+	PVOID SystemInformation,
+	ULONG SystemInformationLength,
+	ULONG* ReturnLength);
+
+// ZwProtectVirtualMemory (win7/win8未导出)
 NTSTATUS (NTAPI* ZwProtectVirtualMemory)(
 	__in HANDLE ProcessHandle,
 	__inout PVOID* BaseAddress,
@@ -47,7 +81,7 @@ NTSTATUS (NTAPI* ZwProtectVirtualMemory)(
 	__out PULONG OldProtect
 ) = NULL;
 
-// MmCopyVirtualMemory (可链接符号)
+// MmCopyVirtualMemory (未声明)
 NTSTATUS NTAPI MmCopyVirtualMemory(
 	PEPROCESS SourceProcess,
 	PVOID SourceAddress,
@@ -556,6 +590,100 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 		}
 		break;
 
+		case PATCH_ACEBASE:
+		{
+			RTL_PROCESS_MODULES*   moduleInfo       = NULL;
+			ULONG                  infoLength       = 0;
+			ULONG64                AceImageBase     = 0;
+			ULONG64                AceImageSize     = 0;
+			ULONG64                pShouldExit      = 0;
+
+
+			// 枚举系统加载的所有内核态模块（驱动模块）
+			ZwQuerySystemInformation(SystemModuleInformation, NULL, 0, &infoLength);
+
+			moduleInfo = ExAllocatePoolWithTag(PagedPool, infoLength, '9d3H');
+			
+			if (moduleInfo) {
+
+				RtlZeroMemory(moduleInfo, infoLength);
+				Status = ZwQuerySystemInformation(SystemModuleInformation, moduleInfo, infoLength, &infoLength);
+
+				if (!NT_SUCCESS(Status)) {
+					ExFreePoolWithTag(moduleInfo, '9d3H');
+					IOCTL_LOG_EXIT("PATCH_ACEBASE::ZwQuerySystemInformation");
+				}
+
+				// 从所有模块中找到tp驱动镜像的加载地址
+				for (ULONG i = 0; i < moduleInfo->NumberOfModules; i++) {
+					if (strstr(moduleInfo->Modules[i].FullPathName, "ACE-BASE")) {
+						AceImageBase = (ULONG64)moduleInfo->Modules[i].ImageBase;
+						AceImageSize = (ULONG64)moduleInfo->Modules[i].ImageSize;
+						break;
+					}
+				}
+
+				ExFreePoolWithTag(moduleInfo, '9d3H');
+			}
+
+			// 若找不到tp驱动模块，则退出
+			if (!AceImageBase) {
+				Status = STATUS_NOT_FOUND;
+				IOCTL_LOG_EXIT("TP驱动（ACE-BASE.sys）尚未加载到系统内核。");
+			}
+
+
+			// 在tp驱动的代码段搜索变量should_exit的特征码
+			
+			// 当前方案：modify should_exit:
+			// pshould_exit = search("0F B6 05 ?? ?? ?? ?? 85 C0 74 02 EB 02 EB B2").get();  // match pattern
+			// validate_assert(pshould_exit) && *(char*)(pshould_exit) == 0;                 // check if patched
+			// *(char*)(should_exit) = 1;
+
+			for (ULONG64 blockStart = AceImageBase; !pShouldExit && blockStart < AceImageBase + AceImageSize; blockStart += 0x1000) {
+
+				if (MmIsAddressValid((PVOID)blockStart)) {
+
+					ULONG64 blockEnd;
+
+					// 若下个页面存在，则允许跨边界搜索，否则仅在当前页面搜索。
+					if (MmIsAddressValid((PVOID)(blockStart + 0x1000))) {
+						blockEnd = blockStart + 0x1000;
+					} else {
+						blockEnd = blockStart + 0xff8;
+					}
+
+					// 从当前页面搜索特征码
+					for (ULONG64 rip = blockStart; rip < blockEnd; rip++) {
+
+						if (0 == memcmp((CHAR*)rip, "\x85\xC0\x74\x02\xEB\x02\xEB\xB2", 8)) {
+							if (0 == memcmp((CHAR*)(rip - 7), "\x0F\xB6\x05", 3)) {
+
+								// mov eax, byte ptr [rip+xxxx]
+								pShouldExit = rip + *(LONG*)(rip - 4);
+								break;
+							}
+						}
+					}
+				}
+			}
+
+			// 检查tp驱动是否满足特征码匹配条件
+			if (!pShouldExit) {
+				Status = STATUS_REQUEST_ABORTED;
+				IOCTL_LOG_EXIT("未搜索到有效的特征。因为TP驱动（ACE-BASE.sys）版本不匹配。");
+			}
+
+			if (*(char*)(pShouldExit) != 0) {
+				Status = STATUS_ALREADY_COMMITTED;
+				IOCTL_LOG_EXIT("变量should_exit已经被置位。若此时System进程仍占用CPU，请考虑其他原因（如Win10自动更新等）。");
+			}
+
+			// 若目标内存满足条件，则立即更改should_exit变量以使目标线程退出
+			*(char*)(pShouldExit) = 1;
+		}
+		break;
+
 		case VMIO_VERSION:
 		{
 			strcpy_s(Input->data, 256, DRIVER_VERSION);
@@ -694,8 +822,8 @@ NTSTATUS DriverEntry(
 
 
 	// 初始化符号链接和I/O设备
-	RtlInitUnicodeString(&dev, L"\\Device\\SGuardLimit_VMIO");
-	RtlInitUnicodeString(&dos, L"\\DosDevices\\SGuardLimit_VMIO");
+	RtlInitUnicodeString(&dev, L"\\Device\\sguard_limit");
+	RtlInitUnicodeString(&dos, L"\\DosDevices\\sguard_limit");
 	IoCreateSymbolicLink(&dos, &dev);
 
 	IoCreateDevice(pDriverObject, 0, &dev, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &pDeviceObject);
